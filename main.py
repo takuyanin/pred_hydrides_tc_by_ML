@@ -61,7 +61,6 @@ from tqdm                       import tqdm
 from tqdm                       import trange
 from time                       import sleep
 
-start = time()
 
 def get_parameters(formula):
     """
@@ -153,6 +152,7 @@ def print_gscv_score_rgr(gscv, X_train, X_test, y_train, y_test, cv):
     print()
     print("Best parameters set found on development set:")
     print(gscv.best_params_)
+    print()
     y_calc = gscv.predict(X_train)
     rmse = np.sqrt(mean_squared_error (y_train, y_calc))
     mae  =         mean_absolute_error(y_train, y_calc)
@@ -204,101 +204,122 @@ def ad_knn(X_train, X_test):
     return y_appd
 
 # ここからデータの前処理
+def make_input_data_file_from(orig_dat_f):
+    # df : DataFrame
+    df = pd.read_csv(filepath_or_buffer=orig_dat_f, header=0, sep=',', usecols=[0, 2, 6])
+    # df['Tc'] = df['     Tc [K]'].astype(np.float64)
+    tqdm.pandas(desc="progress bar")
+    # strip()メソッドで空白文字を削除, ex) ' H5S2  ' -> 'H5S2'
+    df['formula'] = df['formula'].progress_apply(lambda x: x.strip())
+    df['Tc']      = df['     Tc [K]'].progress_apply(float)
+    df['P']       = df['  P [GPa]'].progress_apply(float)
+    df['list']    = df['formula'].progress_apply(get_parameters)
+    for i in trange(len(get_parameters('H3S'))):
+        name     = 'prm' + str(i)
+        df[name] = df['list'].progress_apply(lambda x: x[i])
+    df = df.drop(['     Tc [K]', '  P [GPa]', 'list'], axis=1)
+    df.to_csv(input_dat_f)
+    return df
+
+    # ここから予測（入力）データファイルを作成
+def make_pred_data_file_from(df):
+    tc     = 0.0
+    yx     = []
+    zatom2 = 1 # atomic number Z : 1
+    atom2  = periodic_table.get_el_sp(zatom2) # atom2 : H
+    for zatom1 in trange(3, 5, desc='1st loop'):
+    # for zatom1 in trange(3, 86, desc='1st loop'):
+        atom1 = periodic_table.get_el_sp(zatom1)
+        if (not atom1.is_noble_gas):
+            for natom1 in trange(1, 11, desc='2nd loop'):
+                for natom2 in trange(1, 11, desc='3rd loop'):
+                    for p in trange(50, 550, 50, desc='4th loop'):
+                        str_mat  = str(atom1) + str(natom1) + str(atom2) + str(natom2)
+                        material = Composition(str_mat)
+                        temp     = [material.reduced_formula, tc, float(p)]
+                        temp.extend(get_parameters(material.reduced_formula))
+                        yx.append(temp[:])
+
+    properties = df.columns.values
+    df_test = pd.DataFrame(yx, columns=properties)
+    # material.reduced_formulaにより重複行が発生したため、drop_duplicatesで削除する
+    df_test = df_test.drop_duplicates()
+    df_test.to_csv(pred_dat_f)
+    return df_test
+
+def create_model_AND_eval_perf_by_fitting(input_dat_f, pred_dat_f):
+    # ここからk近傍法
+    range_n    = np.arange(1, 11, dtype=int)
+    nprm       = len(get_parameters('H3S'))
+    name       = 'kNN'
+    model      = KNeighborsRegressor()
+    param_grid = {'n_neighbors' : range_n}
+
+    _, X, y = read_fxy_csv(input_dat_f)
+    f_pred, X_pred, _ = read_fxy_csv(pred_dat_f)
+
+    scaler = StandardScaler()
+
+    X = scaler.fit_transform(X)
+    P_pred = X_pred[:, 0]
+    X_pred = scaler.transform(X_pred)
+
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
+
+    # Set the parameters by cross-validation
+    n_splits = 3
+    # KFold: k-分割交差検証, cv: cross validation
+    cv = KFold(n_splits=n_splits, shuffle=True)
+
+    gscv = GridSearchCV(model, param_grid, cv=cv)
+    gscv.fit(X_train, y_train)
+    # rgr : Regression
+    print_gscv_score_rgr(gscv, X_train, X_test, y_train, y_test, cv)
+
+    # Re-learning with all data & best parameters -> Prediction
+    # 最高性能のモデルを取得し、入力データをモデルに渡し、回帰分析
+    best = gscv.best_estimator_.fit(X, y)
+    y_pred = best.predict(X_pred)
+
+    # Applicable Domain (inside: +1, outside: -1)
+    y_appd = ad_knn(X, X_pred)
+    return X_pred, f_pred, P_pred, y_pred, y_appd
+
+def make_output_data_file(X_pred, f_pred, P_pred, y_pred, y_appd):
+    data = []
+    for i in range(len(X_pred)):
+        temp = (f_pred[i], int(P_pred[i]), int(y_pred[i]), y_appd[i]) # タプル(tuple)
+        data.append(temp)
+    properties = ['formula', 'P', 'Tc', 'AD']
+    df = pd.DataFrame(data, columns=properties)
+    df.sort_values('Tc', ascending=False, inplace=True)
+
+    df.to_csv(output_dat_f, index=False)
+    print('Predicted Tc is written in file {}'.format(output_dat_f))
+
+# main procedure
+orig_dat_f   = 'tc.csv'
+input_dat_f  = 'input.csv'
+pred_dat_f   = 'pred.csv'
+output_dat_f = 'output.csv'
+
+start = time()
+
 print()
-print('make tc_data.csv & tc_pred.csv')
+print('make input.csv')
+input_data = make_input_data_file_from(orig_dat_f)
 print()
-# df : DataFrame
-df = pd.read_csv(filepath_or_buffer='tc.csv', header=0, sep=',', usecols=[0, 2, 6])
-# df['Tc'] = df['     Tc [K]'].astype(np.float64)
-tqdm.pandas(desc="progress bar")
-# strip()メソッドで空白文字を削除, ex) ' H5S2  ' -> 'H5S2'
-df['formula'] = df['formula'].progress_apply(lambda x: x.strip())
-df['Tc']      = df['     Tc [K]'].progress_apply(float)
-df['p']       = df['  P [GPa]'].progress_apply(float)
-df['list']    = df['formula'].progress_apply(get_parameters)
-for i in trange(len(get_parameters('H3S'))):
-    name     = 'prm' + str(i)
-    df[name] = df['list'].progress_apply(lambda x: x[i])
-df = df.drop(['     Tc [K]', '  P [GPa]', 'list'], axis=1)
-df.to_csv("tmp.csv")
-
-# ここから予測（入力）データファイルを作成
-tc     = 0.0
-yx     = []
-zatom2 = 1 # atomic number Z : 1
-atom2  = periodic_table.get_el_sp(zatom2) # atom2 : H
-for zatom1 in trange(3, 86, desc='1st loop'):
-    atom1 = periodic_table.get_el_sp(zatom1)
-    if (not atom1.is_noble_gas):
-        for natom1 in trange(1, 11, desc='2nd loop'):
-            for natom2 in trange(1, 11, desc='3rd loop'):
-                for p in trange(50, 550, 50, desc='4th loop'):
-                    str_mat  = str(atom1) + str(natom1) + str(atom2) + str(natom2)
-                    material = Composition(str_mat)
-                    temp     = [material.reduced_formula, tc, float(p)]
-                    temp.extend(get_parameters(material.reduced_formula))
-                    yx.append(temp[:])
-
-properties = df.columns.values
-df_test = pd.DataFrame(yx, columns=properties)
-# material.reduced_formulaにより重複行が発生したため、drop_duplicatesで削除する
-df_test = df_test.drop_duplicates()
-df_test.to_csv("tmp2.csv")
-
-print("\n\n\n{:.2f} seconds ".format(time() - start))
-
-# ここからk近傍法
-range_n    = np.arange(1, 11, dtype=int)
-nprm       = len(get_parameters('H3S'))
-name       = 'kNN'
-model      = KNeighborsRegressor()
-param_grid = {'n_neighbors' : range_n}
-output     = 'tmp_' + name + '.csv'
-
+print()
+print()
+print('make pred.csv')
+pred_data  = make_pred_data_file_from(input_data)
+print()
+print()
+print()
+print("{:.2f} seconds ".format(time() - start))
 print()
 print('read train & pred data from csv file')
+X_pred, f_pred, P_pred, y_pred, y_appd = create_model_AND_eval_perf_by_fitting(input_dat_f, pred_dat_f)
+_          = make_output_data_file(X_pred, f_pred, P_pred, y_pred, y_appd)
 print()
-data_file = 'tmp.csv'
-_, X, y = read_fxy_csv(data_file)
-pred_file = 'tmp2.csv'
-f_pred, X_pred, _ = read_fxy_csv(pred_file)
-
-scaler = StandardScaler()
-
-X = scaler.fit_transform(X)
-P_pred = X_pred[:, 0]
-X_pred = scaler.transform(X_pred)
-
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
-
-# Set the parameters by cross-validation
-n_splits = 3
-# KFold: k-分割交差検証, cv: cross validation
-cv = KFold(n_splits=n_splits, shuffle=True)
-
-gscv = GridSearchCV(model, param_grid, cv=cv)
-gscv.fit(X_train, y_train)
-# rgr : Regression
-print_gscv_score_rgr(gscv, X_train, X_test, y_train, y_test, cv)
-
-# Re-learning with all data & best parameters -> Prediction
-# 最高性能のモデルを取得し、入力データをモデルに渡し、回帰分析
-best = gscv.best_estimator_.fit(X, y)
-y_pred = best.predict(X_pred)
-
-# Applicable Domain (inside: +1, outside: -1)
-y_appd = ad_knn(X, X_pred)
-
-data = []
-for i in range(len(X_pred)):
-    temp = (f_pred[i], int(P_pred[i]), int(y_pred[i]), y_appd[i]) # タプル(tuple)
-    data.append(temp)
-
-properties = ['formula', 'P', 'Tc', 'AD']
-df = pd.DataFrame(data, columns=properties)
-df.sort_values('Tc', ascending=False, inplace=True)
-
-df.to_csv(output, index=False)
-print('Predicted Tc is written in file {}'.format(output))
-
 print('{:.2f} seconds '.format(time() - start))
